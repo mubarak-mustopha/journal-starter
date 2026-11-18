@@ -17,3 +17,8 @@ def configure_logging(level: int = logging.INFO) -> None:
     logging exercise runs entry operations at INFO and DEBUG to compare output.
     Never log journal text, settings objects, or credentials.
     """
+    logging.basicConfig(
+        format="%(levelname)s: %(name)s - %(message)s", handlers=[logging.StreamHandler()]
+    )
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
