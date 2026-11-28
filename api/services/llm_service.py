@@ -9,10 +9,13 @@ Set OPENAI_API_KEY, OPENAI_BASE_URL, and OPENAI_MODEL in your .env file.
 Settings are loaded by ``api.config.Settings``.
 """
 
+import json
+
 import httpx
 from openai import AsyncOpenAI
 
 from api.config import get_settings
+from api.models.entry import AnalysisResponse
 
 
 class InvalidAnalysisResponseError(ValueError):
@@ -32,6 +35,40 @@ def _default_client() -> AsyncOpenAI:
         timeout=httpx.Timeout(60.0, connect=5.0),
         max_retries=1,
     )
+
+
+analysis_schema = {
+    "type": "object",
+    "properties": {
+        "sentiment": {"type": "string", "enum": ["positive", "negative", "neutral"]},
+        "summary": {
+            "type": "string",
+            "minLength": 1,
+        },
+        "topics": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "description": "a topic the user explored or learned about",
+            },
+            "minItems": 2,
+            "maxItems": 4,
+        },
+    },
+    "additionalProperties": False,
+    "required": ["sentiment", "summary", "topics"],
+}
+
+analysis_instructions = "Analyze user's journal entry"
+
+
+def check_refusal(messages: list) -> bool:
+    for m in messages:
+        for item in m.content:
+            if item.type == "refusal":
+                return True
+    return False
 
 
 async def analyze_journal_entry(
@@ -84,10 +121,37 @@ async def analyze_journal_entry(
 
     request_failed = True
     try:
-        raise NotImplementedError(
-            "Chapter 9: implement the request and validation here. "
-            "See docs/09-ai-analysis.md for the walkthrough."
+        response = await client.responses.create(
+            model=get_settings().openai_model,
+            instructions=analysis_instructions,
+            input=entry_text,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "journal_analysis",
+                    "strict": True,
+                    "schema": analysis_schema,
+                }
+            },
         )
+
+        if response.status != "completed":
+            raise InvalidAnalysisResponseError(f"Response incompleted. Status: {response.status}")
+        if not response.output_text.strip():
+            raise InvalidAnalysisResponseError("Response text is empty")
+
+        output_messages = [output for output in response.output if output.type == "message"]
+        if check_refusal(output_messages):
+            raise InvalidAnalysisResponseError("Model refused to give a response")
+
+        output_parsed = json.loads(response.output_text)
+        if not isinstance(output_parsed, dict):
+            raise InvalidAnalysisResponseError("Parsed response did not return a dict")
+
+        output_parsed = {k: output_parsed.get(k) for k in ["sentiment", "summary", "topics"]}
+        output_parsed["entry_id"] = entry_id
+        return AnalysisResponse.model_validate(output_parsed).model_dump()
+
     finally:
         if owns_client:
             try:
